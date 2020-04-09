@@ -6,6 +6,7 @@
  */ 
 
 #include "Switch.h"
+#include "driver/gpio.h"
 
 SwitchClass Switch;
 
@@ -47,7 +48,7 @@ uint8_t SwitchClass::getSwitchID(){
 	return Switch_ID;
 }
 
-void SwitchClass::initializeSwitch(uint8_t pinNumber, SwitchClass *sptr){
+void SwitchClass::initializeSwitch(uint8_t pinNumber){
 	ShortPressPtr = NULL;
 	DoublePressPtr = NULL;
 	LongPressPtr = NULL;
@@ -72,7 +73,7 @@ void SwitchClass::initializeSwitch(uint8_t pinNumber, SwitchClass *sptr){
 	// 	SwitchState = PIND;
 	// 	break;
 	// }
-	Sptr[i] = sptr;
+	Sptr[i] = this;
 	Switch_ID = i;
 	i += 1;
 	#ifdef DEBUG_SWITCH

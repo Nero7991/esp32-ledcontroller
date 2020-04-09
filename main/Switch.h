@@ -11,7 +11,6 @@
 
 ////#include "Essential.h"
 #include "Timer.h"
-#include "driver/gpio.h"
 
 class SwitchClass{
 	
@@ -55,11 +54,11 @@ class SwitchClass{
 		
 		uint16_t timeSincePressedOnce, TimePassed;;
 		
-		void initializeSwitch(uint8_t pinNumber, SwitchClass *sptr);
+		void initializeSwitch(uint8_t pinNumber);
 		
 		void pollSwitch();
 		
-		//void updatePinBuffers();
+		void updatePinBuffers();
 		
 		void longWaitComplete();
 		
