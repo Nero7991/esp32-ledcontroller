@@ -1,8 +1,4 @@
-# Edit following two lines to set component requirements (see docs)
-set(COMPONENT_REQUIRES )
-set(COMPONENT_PRIV_REQUIRES )
-
-set(COMPONENT_SRCS "Switch.cpp" "Timer.cpp" "main.cpp")
-set(COMPONENT_ADD_INCLUDEDIRS "")
-
-register_component()
+idf_component_register(SRCS "main.cpp" "Timer.cpp" "Switch.cpp"
+                    INCLUDE_DIRS "."
+                    EMBED_TXTFILES "certs/cacert.pem"
+                                   "certs/prvtkey.pem")

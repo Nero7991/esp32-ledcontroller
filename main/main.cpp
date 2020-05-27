@@ -19,6 +19,8 @@
 #include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
+#include "esp_partition.h"
+#include "esp_ota_ops.h"
 #include "esp_log.h"
 #include "esp_event.h"
 #include "esp_pm.h"
@@ -56,6 +58,7 @@
 
 void upButtonPressed(uint8_t SwitchId);
 void downButtonPressed(uint8_t SwitchId);
+void toggleFadeMode(uint8_t SwitchId);
 volatile int FadeLutPointer = 0, SetLutPointer = 1000, CurrentLutPointer = 0;
 volatile bool FadeDirection = 0;
 volatile bool FadeEnabled = 0;
@@ -157,6 +160,67 @@ static void http_get_task(void *pvParameters)
     }
 }
 
+void backtofactory()
+{
+    esp_partition_iterator_t  pi ;                                  // Iterator for find
+    const esp_partition_t*    factory ;                             // Factory partition
+    esp_err_t                 err ;
+
+    pi = esp_partition_find ( ESP_PARTITION_TYPE_APP,               // Get partition iterator for
+                              ESP_PARTITION_SUBTYPE_APP_FACTORY,    // factory partition
+                              "factory" ) ;
+    if ( pi == NULL )                                               // Check result
+    {
+        ESP_LOGE ( TAG, "Failed to find factory partition" ) ;
+    }
+    else
+    {
+        factory = esp_partition_get ( pi ) ;                        // Get partition struct
+        esp_partition_iterator_release ( pi ) ;                     // Release the iterator
+        err = esp_ota_set_boot_partition ( factory ) ;              // Set partition for boot
+        if ( err != ESP_OK )                                        // Check error
+	    {
+            ESP_LOGE ( TAG, "Failed to set boot partition" ) ;
+	    }
+    }
+}
+
+static esp_err_t update_get_handler(httpd_req_t *req)
+{
+    char*  buf;
+    size_t buf_len;
+
+    /* Get header value string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        /* Copy null terminated value string into buffer */
+        if (httpd_req_get_hdr_value_str(req, "Host", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Host: %s", buf);
+        }
+        free(buf);
+    }   
+    ESP_LOGI(TAG, "Trying firmware update...");
+    /* Set some custom headers */
+    httpd_resp_set_hdr(req, "Custom-Header-1", "Custom-Value-1");
+    httpd_resp_set_hdr(req, "Custom-Header-2", "Custom-Value-2");
+
+    /* Send response with custom headers and body set as the
+     * string passed in user context*/
+    const char* resp_str = (const char*) req->user_ctx;
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+
+    /* After sending the HTTP response the old HTTP request
+     * headers are lost. Check if HTTP request headers can be read now. */
+    if (httpd_req_get_hdr_value_len(req, "Host") == 0) {
+        ESP_LOGI(TAG, "Request headers lost");
+    }
+    backtofactory();
+    esp_restart();   
+    return ESP_OK;
+}
+
 
 static esp_err_t hello_get_handler(httpd_req_t *req)
 {
@@ -208,6 +272,10 @@ static esp_err_t hello_get_handler(httpd_req_t *req)
                 upButtonPressed(0);
             if(strcmp(buf, "dec") == 0)
                 downButtonPressed(0);
+            if(strcmp(buf, "med") == 0)
+                SetLutPointer = 300;
+            if(strcmp(buf, "fade") == 0)
+                toggleFadeMode(0);
             char param[32];
             /* Get value of expected key from query string */
             if (httpd_query_key_value(buf, "query1", param, sizeof(param)) == ESP_OK) {
@@ -240,13 +308,23 @@ static esp_err_t hello_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static const httpd_uri_t hello = {
+static const httpd_uri_t setBrightness = {
     .uri       = "/setledbrightness",
     .method    = HTTP_GET,
     .handler   = hello_get_handler,
     /* Let's pass response string in user
      * context to demonstrate it's usage */
     .user_ctx  = (void*)"Hello World!"
+};
+
+
+static const httpd_uri_t updateFirmware = {
+    .uri       = "/updatefirmware",
+    .method    = HTTP_GET,
+    .handler   = update_get_handler,
+    /* Let's pass response string in user
+     * context to demonstrate it's usage */
+    .user_ctx  = (void*)"Resetting to factory OTA program..."
 };
 
 /* An HTTP POST handler */
@@ -315,7 +393,8 @@ static httpd_handle_t start_webserver(void)
     if (httpd_start(&server, &config) == ESP_OK) {
         // Set URI handlers
         ESP_LOGI(TAG, "Registering URI handlers");
-        httpd_register_uri_handler(server, &hello);
+        httpd_register_uri_handler(server, &setBrightness);
+        httpd_register_uri_handler(server, &updateFirmware);
         httpd_register_uri_handler(server, &echo);
         //httpd_register_uri_handler(server, &ctrl);
         return server;
@@ -508,7 +587,7 @@ ledc_channel_config_t ledc_channel[LEDC_TEST_CH_NUM] = {
         0,
     }};
 
-static void IRAM_ATTR gpio_isr_handler(void *arg)
+static void gpio_isr_handler(void *arg)
 {
     uint32_t gpio_num = (uint32_t)arg;
     S1.pinStateChanged();
@@ -516,7 +595,7 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
 }
 
 volatile uint64_t cnt = 0;
-static void IRAM_ATTR timer_group0_isr(void *para)
+static void timer_group0_isr(void *para)
 {
     timer_spinlock_take(TIMER_GROUP_0);
     int timer_idx = (int)para;
@@ -628,7 +707,19 @@ void setupGroup0Timer0();
 
 extern "C" void app_main(void)
 {
-    setupWifi();  
+   
+    backtofactory();
+
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    // Display the running partition
+    ESP_LOGI(TAG, "Running partition: %s", running->label);
+    ESP_LOGI(TAG, "Partition Type: %d", (uint8_t)running->type);
+    ESP_LOGI(TAG, "Partition Subtype: %d", (uint8_t)running->subtype);
+
+
+    setupWifi();
+    //vTaskDelay(2000 / portTICK_RATE_MS);  
     setupLedPwm();
     setupGpio();
     setupGroup0Timer0();
@@ -746,6 +837,6 @@ void setupGroup0Timer0()
     timer_set_alarm_value(TIMER_GROUP_0, TIMER_0, 10000);
     timer_enable_intr(TIMER_GROUP_0, TIMER_0);
     timer_isr_register(TIMER_GROUP_0, TIMER_0, timer_group0_isr,
-                       (void *)TIMER_0, ESP_INTR_FLAG_IRAM, NULL);
+                       (void *)TIMER_0, ESP_INTR_FLAG_DEFAULT, NULL);
     timer_start(TIMER_GROUP_0, TIMER_0);
 }
