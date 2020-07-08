@@ -13,6 +13,10 @@
 #include "freertos/queue.h"
 #include "driver/periph_ctrl.h"
 #include "driver/timer.h"
+#include <time.h>
+#include <sys/time.h>
+#include "esp_sntp.h"
+
 #include "Timer.h"
 #include "Switch.h"
 
@@ -59,9 +63,23 @@
 void upButtonPressed(uint8_t SwitchId);
 void downButtonPressed(uint8_t SwitchId);
 void toggleFadeMode(uint8_t SwitchId);
+static void obtain_time(void);
+static void initialize_sntp(void);
+void time_sync_notification_cb(struct timeval *tv);
 volatile int FadeLutPointer = 0, SetLutPointer = 1000, CurrentLutPointer = 0;
 volatile bool FadeDirection = 0;
 volatile bool FadeEnabled = 0;
+time_t StartTime;
+
+struct Alarm {
+    char HourStr[5], MinStr[5], DayStr[5];
+    bool AlarmType;
+};
+
+Alarm Alarms[20];
+int MaxAlarms = 20;
+int CurrentAlarmPointer = 0;
+
 
 /* Constants that aren't configurable in menuconfig */
 #define WEB_SERVER "example.com"
@@ -183,6 +201,11 @@ void backtofactory()
             ESP_LOGE ( TAG, "Failed to set boot partition" ) ;
 	    }
     }
+}
+
+void time_sync_notification_cb(struct timeval *tv)
+{
+    ESP_LOGI(TAG, "Notification of a time synchronization event");
 }
 
 static esp_err_t update_get_handler(httpd_req_t *req)
@@ -308,6 +331,209 @@ static esp_err_t hello_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t time_get_handler(httpd_req_t *req)
+{
+    char*  buf;
+    size_t buf_len;
+
+    /* Get header value string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        /* Copy null terminated value string into buffer */
+        if (httpd_req_get_hdr_value_str(req, "Host", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Host: %s", buf);
+        }
+        free(buf);
+    }   
+    /* Set some custom headers */
+    time_t now;
+    struct tm TimeCurrent, TimeBoot;
+        // update 'now' variable with current time
+        time(&now);
+        char strftime_buf[64], strftime_buf2[64];
+        char Res[100];
+        Res[0] = '\0';
+        strcat(Res, "Current Time: ");
+    
+    // Set timezone to Eastern Standard Time and print local time
+    
+    localtime_r(&StartTime, &TimeBoot);
+    localtime_r(&now, &TimeCurrent);
+    strftime(strftime_buf, sizeof(strftime_buf), "%c", &TimeCurrent);
+    strcat(Res, strftime_buf);
+    strcat(Res, " Boot Time: ");
+    strftime(strftime_buf2, sizeof(strftime_buf2), "%c", &TimeBoot);
+    strcat(Res, strftime_buf2);
+
+    ESP_LOGI(TAG, "The current date/time in Mumbai is: %s", strftime_buf);
+
+    const char* resp_str = (const char*)Res;
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+
+    /* After sending the HTTP response the old HTTP request
+     * headers are lost. Check if HTTP request headers can be read now. */
+    if (httpd_req_get_hdr_value_len(req, "Host") == 0) {
+        ESP_LOGI(TAG, "Request headers lost");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t delete_alarms_handler(httpd_req_t *req)
+{
+    char*  buf;
+    size_t buf_len;
+
+    /* Get header value string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        /* Copy null terminated value string into buffer */
+        if (httpd_req_get_hdr_value_str(req, "Host", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Host: %s", buf);
+        }
+        free(buf);
+    }   
+    /* Set some custom headers */
+
+    CurrentAlarmPointer = 0;
+    const char* resp_str = (const char*)"All alarms deleted";
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+
+    /* After sending the HTTP response the old HTTP request
+     * headers are lost. Check if HTTP request headers can be read now. */
+    if (httpd_req_get_hdr_value_len(req, "Host") == 0) {
+        ESP_LOGI(TAG, "Request headers lost");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t alarm_set_handler(httpd_req_t *req)
+{
+    char*  buf;
+    size_t buf_len;
+
+    /* Get header value string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        /* Copy null terminated value string into buffer */
+        if (httpd_req_get_hdr_value_str(req, "Host", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Host: %s", buf);
+        }
+        free(buf);
+    }
+
+    buf_len = httpd_req_get_hdr_value_len(req, "Test-Header-2") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        if (httpd_req_get_hdr_value_str(req, "Test-Header-2", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Test-Header-2: %s", buf);
+        }
+        free(buf);
+    }
+
+    buf_len = httpd_req_get_hdr_value_len(req, "Test-Header-1") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        if (httpd_req_get_hdr_value_str(req, "Test-Header-1", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Test-Header-1: %s", buf);
+        }
+        free(buf);
+    }
+
+    /* Read URL query string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    buf_len = httpd_req_get_url_query_len(req) + 1;
+    char Response[32], TimeStr[8];
+    Response[0] = '\0';
+    TimeStr[0] = '\0';
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found URL query => %s", buf);
+            char param[32];
+            char Hour[5], Min[5], Day[5], Type[5];
+            Hour[0] = '\0';
+            Min[0] = '\0';
+            Day[0] = '\0';
+            Type[0] = '\0';
+            struct tm Tm1;
+            /* Get value of expected key from query string */
+            if (httpd_query_key_value(buf, "hours", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query1=%s", param);
+                strcat(Hour, param);
+            }
+            if (httpd_query_key_value(buf, "mins", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query3=%s", param);
+                strcat(Min, param);
+            }
+            if (httpd_query_key_value(buf, "day", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query2=%s", param);
+                strcat(Day, param);
+            }
+            if (httpd_query_key_value(buf, "type", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query2=%s", param);
+                strcat(Type, param);
+            }
+            strcat(TimeStr, Hour);
+            strcat(TimeStr, ":");
+            strcat(TimeStr, Min);
+            if(strptime(TimeStr, "%R", &Tm1) == NULL){
+                strcat(Response, "Invalid time format");
+            }
+            else{
+                Alarms[CurrentAlarmPointer].HourStr[0] = '\0';
+                Alarms[CurrentAlarmPointer].MinStr[0] = '\0';
+                if(strcmp(Type, "on") == 0){
+                    Alarms[CurrentAlarmPointer].AlarmType = true;
+                    strcat(Alarms[CurrentAlarmPointer].HourStr, Hour);
+                    strcat(Alarms[CurrentAlarmPointer].MinStr, Min);
+                    //strcat(Alarms[CurrentAlarmPointer].DayStr, Day);
+                    strcat(Response, "Alarm set! ");
+                    if(CurrentAlarmPointer != MaxAlarms - 1)
+                    CurrentAlarmPointer += 1;
+                }
+                else if(strcmp(Type, "off") == 0){
+                    Alarms[CurrentAlarmPointer].AlarmType = false;
+                    strcat(Alarms[CurrentAlarmPointer].HourStr, Hour);
+                    strcat(Alarms[CurrentAlarmPointer].MinStr, Min);
+                    //strcat(Alarms[CurrentAlarmPointer].DayStr, Day);
+                    strcat(Response, "Alarm set! ");
+                    if(CurrentAlarmPointer != MaxAlarms - 1)
+                    CurrentAlarmPointer += 1;
+                }
+                else{
+                    strcat(Response, "Invalid time format");
+                }
+            }
+            strcat(Response, "Input: ");
+            strcat(Response, TimeStr);
+        }
+        free(buf);
+    }
+
+    /* Set some custom headers */
+    httpd_resp_set_hdr(req, "Custom-Header-1", "Custom-Value-1");
+    httpd_resp_set_hdr(req, "Custom-Header-2", "Custom-Value-2");
+
+    /* Send response with custom headers and body set as the
+     * string passed in user context*/
+    const char* resp_str = (const char*)Response;
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+
+    /* After sending the HTTP response the old HTTP request
+     * headers are lost. Check if HTTP request headers can be read now. */
+    if (httpd_req_get_hdr_value_len(req, "Host") == 0) {
+        ESP_LOGI(TAG, "Request headers lost");
+    }
+    return ESP_OK;
+}
+
+
 static const httpd_uri_t setBrightness = {
     .uri       = "/setledbrightness",
     .method    = HTTP_GET,
@@ -325,6 +551,36 @@ static const httpd_uri_t updateFirmware = {
     /* Let's pass response string in user
      * context to demonstrate it's usage */
     .user_ctx  = (void*)"Resetting to factory OTA program..."
+};
+
+time_t now;
+    struct tm timeinfo;
+
+static const httpd_uri_t getDeviceTime = {
+    .uri       = "/getdevicetime",
+    .method    = HTTP_GET,
+    .handler   = time_get_handler,
+    /* Let's pass response string in user
+     * context to demonstrate it's usage */
+    .user_ctx  = (void*)""
+};
+
+static const httpd_uri_t setAlarm = {
+    .uri       = "/setalarm",
+    .method    = HTTP_GET,
+    .handler   = alarm_set_handler,
+    /* Let's pass response string in user
+     * context to demonstrate it's usage */
+    .user_ctx  = (void*)""
+};
+
+static const httpd_uri_t deleteAllAlarms = {
+    .uri       = "/deletealarms",
+    .method    = HTTP_GET,
+    .handler   = delete_alarms_handler,
+    /* Let's pass response string in user
+     * context to demonstrate it's usage */
+    .user_ctx  = (void*)""
 };
 
 /* An HTTP POST handler */
@@ -395,6 +651,9 @@ static httpd_handle_t start_webserver(void)
         ESP_LOGI(TAG, "Registering URI handlers");
         httpd_register_uri_handler(server, &setBrightness);
         httpd_register_uri_handler(server, &updateFirmware);
+        httpd_register_uri_handler(server, &getDeviceTime);
+        httpd_register_uri_handler(server, &setAlarm);
+        httpd_register_uri_handler(server, &deleteAllAlarms);
         httpd_register_uri_handler(server, &echo);
         //httpd_register_uri_handler(server, &ctrl);
         return server;
@@ -503,6 +762,30 @@ static void wifi_power_save(void)
     xTaskCreate(&http_get_task, "http_get_task", 4096, NULL, 5, NULL);
     server = start_webserver();
 }
+
+static void initialize_sntp(void)
+{
+    ESP_LOGI(TAG, "Initializing SNTP");
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+#ifdef CONFIG_SNTP_TIME_SYNC_METHOD_SMOOTH
+    sntp_set_sync_mode(SNTP_SYNC_MODE_SMOOTH);
+#endif
+    sntp_init();
+}
+
+static void obtain_time(void)
+{
+    // wait for time to be set
+    int retry = 0;
+    const int retry_count = 10;
+    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+    }
+}
+
 
 void setupWifi(void)
 {
@@ -724,6 +1007,15 @@ extern "C" void app_main(void)
     setupGpio();
     setupGroup0Timer0();
 
+    initialize_sntp();
+    obtain_time();
+
+    // Set timezone to Asia/Kolkata
+    setenv("TZ", "IST-5:30", 1);
+    tzset();
+
+    time(&StartTime);
+
     T1.initializeTimer();
     T1.setCallBackTime(1, true, timerEnded);
 
@@ -738,6 +1030,28 @@ extern "C" void app_main(void)
     {
 
         printf("Time: %" PRIu64 "\n", Timer.millis());
+        time_t Now;
+        struct tm TimeCurrent;
+        char StrHour[5], StrMin[5];
+        StrHour[0] = '\0';
+        StrMin[0] = '\0';
+        time(&Now);
+        localtime_r(&Now, &TimeCurrent);
+        strftime(StrHour, sizeof(StrHour), "%H", &TimeCurrent);
+        strftime(StrMin, sizeof(StrMin), "%M", &TimeCurrent);
+        if(strcmp(StrMin, "30") == 0 || strcmp(StrMin, "00") == 0)
+            obtain_time();
+        for (int i = 0; i < CurrentAlarmPointer; i++){
+            if((strcmp(Alarms[i].HourStr, StrHour) == 0) && (strcmp(Alarms[i].MinStr, StrMin)) == 0){
+                if(Alarms[i].AlarmType)
+                SetLutPointer = 1000;
+                else
+                {
+                    SetLutPointer = 0;
+                }
+                
+            }
+        }
         vTaskDelay(1000 / portTICK_RATE_MS);
         gpio_set_level(GPIO_OUTPUT_IO_0, cnt % 2);
         gpio_set_level(GPIO_OUTPUT_IO_1, cnt % 2);
