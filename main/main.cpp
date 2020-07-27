@@ -40,7 +40,7 @@
 #include <sys/param.h>
 #include "esp_netif.h"
 #include "esp_eth.h"
-
+using namespace std; 
 //#include <esp_https_server.h>
 
 /**
@@ -63,6 +63,10 @@
 void upButtonPressed(uint8_t SwitchId);
 void downButtonPressed(uint8_t SwitchId);
 void toggleFadeMode(uint8_t SwitchId);
+void turnOn(uint8_t TimerId);
+void turnOff(uint8_t TimerId);
+void turnOnFor(int Time);
+int convertStringToNumber(char* str);
 static void obtain_time(void);
 static void initialize_sntp(void);
 void time_sync_notification_cb(struct timeval *tv);
@@ -79,6 +83,7 @@ struct Alarm {
 Alarm Alarms[20];
 int MaxAlarms = 20;
 int CurrentAlarmPointer = 0;
+TimerClass T1, OnTimer;
 
 
 /* Constants that aren't configurable in menuconfig */
@@ -245,7 +250,7 @@ static esp_err_t update_get_handler(httpd_req_t *req)
 }
 
 
-static esp_err_t hello_get_handler(httpd_req_t *req)
+static esp_err_t set_brightness_handler(httpd_req_t *req)
 {
     char*  buf;
     size_t buf_len;
@@ -533,16 +538,113 @@ static esp_err_t alarm_set_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t turn_device_on_handler(httpd_req_t *req)
+{
+    char*  buf;
+    size_t buf_len;
+
+    /* Read URL query string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    char Response[32];
+    Response[0] = '\0';
+    buf_len = httpd_req_get_url_query_len(req) + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found URL query => %s", buf);
+            char param[32];
+            /* Get value of expected key from query string */
+            if (httpd_query_key_value(buf, "time", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query1=%s", param);
+                if(strcmp(param, "0") == 0){
+                    turnOn(0);
+                    strcat(Response, "Turned on indefinitely");
+                }
+                else{
+                    uint32_t OnTime;
+                    OnTime = convertStringToNumber(param);
+                    if(OnTime != 0){
+                        turnOnFor(OnTime);
+                        strcat(Response, "Turned for ");
+                        strcat(Response, param);
+                        strcat(Response, " minutes");
+                    }
+                    else{
+                        strcat(Response,"Invalid input");
+                    }
+                }
+            }
+        }
+        free(buf);
+    }
+
+    /* Send response with custom headers and body set as the
+     * string passed in user context*/
+    const char* resp_str = (const char*)Response;
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+
+    /* After sending the HTTP response the old HTTP request
+     * headers are lost. Check if HTTP request headers can be read now. */
+    if (httpd_req_get_hdr_value_len(req, "Host") == 0) {
+        ESP_LOGI(TAG, "Request headers lost");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t turn_device_off_handler(httpd_req_t *req)
+{
+    char*  buf;
+    size_t buf_len;
+
+    /* Read URL query string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    buf_len = httpd_req_get_url_query_len(req) + 1;
+    if (buf_len > 1) {
+       
+    }
+
+    turnOff(0);
+    OnTimer.resetTimer();
+
+    /* Send response with custom headers and body set as the
+     * string passed in user context*/
+    const char* resp_str = (const char*) req->user_ctx;
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+
+    /* After sending the HTTP response the old HTTP request
+     * headers are lost. Check if HTTP request headers can be read now. */
+    if (httpd_req_get_hdr_value_len(req, "Host") == 0) {
+        ESP_LOGI(TAG, "Request headers lost");
+    }
+    return ESP_OK;
+}
 
 static const httpd_uri_t setBrightness = {
     .uri       = "/setledbrightness",
     .method    = HTTP_GET,
-    .handler   = hello_get_handler,
+    .handler   = set_brightness_handler,
     /* Let's pass response string in user
      * context to demonstrate it's usage */
-    .user_ctx  = (void*)"Hello World!"
+    .user_ctx  = (void*)"Brightness set successfully"
 };
 
+static const httpd_uri_t turnOnForHttp = {
+    .uri       = "/turnonfor",
+    .method    = HTTP_GET,
+    .handler   = turn_device_on_handler,
+    /* Let's pass response string in user
+     * context to demonstrate it's usage */
+    .user_ctx  = (void*)""
+};
+
+static const httpd_uri_t turnOffHttp = {
+    .uri       = "/turnoff",
+    .method    = HTTP_GET,
+    .handler   = turn_device_off_handler,
+    /* Let's pass response string in user
+     * context to demonstrate it's usage */
+    .user_ctx  = (void*)"Turned off"
+};
 
 static const httpd_uri_t updateFirmware = {
     .uri       = "/updatefirmware",
@@ -554,7 +656,7 @@ static const httpd_uri_t updateFirmware = {
 };
 
 time_t now;
-    struct tm timeinfo;
+struct tm timeinfo;
 
 static const httpd_uri_t getDeviceTime = {
     .uri       = "/getdevicetime",
@@ -654,6 +756,8 @@ static httpd_handle_t start_webserver(void)
         httpd_register_uri_handler(server, &getDeviceTime);
         httpd_register_uri_handler(server, &setAlarm);
         httpd_register_uri_handler(server, &deleteAllAlarms);
+        httpd_register_uri_handler(server, &turnOnForHttp);
+        httpd_register_uri_handler(server, &turnOffHttp);
         httpd_register_uri_handler(server, &echo);
         //httpd_register_uri_handler(server, &ctrl);
         return server;
@@ -693,8 +797,9 @@ static void connect_handler(void* arg, esp_event_base_t event_base,
 
 
 /*set the ssid and password via "idf.py menuconfig"*/
-#define DEFAULT_SSID "Collaco WiFi"
+#define DEFAULT_SSID "Collaco Hall"
 #define DEFAULT_PWD "Orencollaco1997"
+#define Bssid { 0xCC, 0x32, 0xE5, 0x41, 0xDD, 0x6B };
 
 #define DEFAULT_LISTEN_INTERVAL 3
 
@@ -741,15 +846,17 @@ static void wifi_power_save(void)
     assert(sta_netif);
 
     wifi_config_t wifi_config = {
-        {
+        .sta = {
             DEFAULT_SSID,
             DEFAULT_PWD,
             {},
+            0,
+            {},
+            {},
+            DEFAULT_LISTEN_INTERVAL,
             {},
             {},
             {},
-            {},
-            DEFAULT_LISTEN_INTERVAL
         },
     };
 
@@ -814,13 +921,14 @@ void setupWifi(void)
     wifi_power_save();
 }
 
-#define GPIO_OUTPUT_IO_0 (gpio_num_t)18
-#define GPIO_OUTPUT_IO_1 (gpio_num_t)19
-#define GPIO_OUTPUT_PIN_SEL ((1ULL << GPIO_OUTPUT_IO_0) | (1ULL << GPIO_OUTPUT_IO_1))
-#define GPIO_INPUT_IO_0 (gpio_num_t)4
-#define GPIO_INPUT_IO_1 (gpio_num_t)5
-#define GPIO_INPUT_PIN_SEL ((1ULL << GPIO_INPUT_IO_0) | (1ULL << GPIO_INPUT_IO_1))
-#define ESP_INTR_FLAG_DEFAULT 0
+#define GPIO_OUTPUT_PWM_LED0            (gpio_num_t)18
+#define GPIO_OUTPUT_PWM_LED1            (gpio_num_t)19
+#define GPIO_OUTPUT_DIGITAL_DEVICE      (gpio_num_t)27
+#define GPIO_OUTPUT_PIN_SEL             (( 1ULL << GPIO_OUTPUT_PWM_LED0) | (1ULL << GPIO_OUTPUT_PWM_LED1) | (1ULL << GPIO_OUTPUT_DIGITAL_DEVICE))
+#define GPIO_INPUT_IO_0                 (gpio_num_t)4
+#define GPIO_INPUT_IO_1                 (gpio_num_t)5
+#define GPIO_INPUT_PIN_SEL              ((1ULL << GPIO_INPUT_IO_0) | (1ULL << GPIO_INPUT_IO_1))
+#define ESP_INTR_FLAG_DEFAULT           0 
 
 #define LEDC_HS_TIMER LEDC_TIMER_0
 #define LEDC_HS_MODE LEDC_HIGH_SPEED_MODE
@@ -839,7 +947,7 @@ void setupWifi(void)
 #define TIMER_ALARM_VALUE APU_CLK / (TIMER_DIVIDER * INVERSE_TIME)
 
 static xQueueHandle gpio_evt_queue = NULL;
-TimerClass T1;
+
 SwitchClass S1, S2;
 extern TimerClass Timer;
 volatile int SetDuty = 0, Duty = 0;
@@ -984,6 +1092,27 @@ void downButtonPressed(uint8_t SwitchId)
     SetLutPointer -= 100;
 }
 
+void turnOn(uint8_t TimerId){
+    gpio_set_level(GPIO_OUTPUT_DIGITAL_DEVICE, 1);
+}
+
+void turnOff(uint8_t Id){
+    gpio_set_level(GPIO_OUTPUT_DIGITAL_DEVICE, 0);
+}
+
+void turnOnFor(int Time){
+    uint32_t TimeInMilli = Time * 60000;
+    OnTimer.setCallBackTime(TimeInMilli, 0, turnOff);
+    turnOn(0);
+}
+
+int convertStringToNumber(char* str){
+    int x; 
+    sscanf((const char*)str, "%d", &x);
+    return x;
+}
+
+
 void setupLedPwm();
 void setupGpio();
 void setupGroup0Timer0();
@@ -1013,10 +1142,9 @@ extern "C" void app_main(void)
     // Set timezone to Asia/Kolkata
     setenv("TZ", "IST-5:30", 1);
     tzset();
-
     time(&StartTime);
-
     T1.initializeTimer();
+    OnTimer.initializeTimer();
     T1.setCallBackTime(1, true, timerEnded);
 
     S1.initializeSwitch(4);
@@ -1026,6 +1154,9 @@ extern "C" void app_main(void)
     S2.shortPress(downButtonPressed);
     S1.longPress(toggleLight);
     S2.longPress(toggleFadeMode);
+    uint64_t Time_AcquireTime;
+    bool IsFirstTime = true;
+    Time_AcquireTime = Timer.millis();
     while (1)
     {
 
@@ -1035,6 +1166,11 @@ extern "C" void app_main(void)
         char StrHour[5], StrMin[5];
         StrHour[0] = '\0';
         StrMin[0] = '\0';
+        if(((Timer.millis() - Time_AcquireTime) > 15000) && IsFirstTime){
+            obtain_time();
+            time(&StartTime);
+            IsFirstTime = false;
+        }
         time(&Now);
         localtime_r(&Now, &TimeCurrent);
         strftime(StrHour, sizeof(StrHour), "%H", &TimeCurrent);
@@ -1053,13 +1189,14 @@ extern "C" void app_main(void)
             }
         }
         vTaskDelay(1000 / portTICK_RATE_MS);
-        gpio_set_level(GPIO_OUTPUT_IO_0, cnt % 2);
-        gpio_set_level(GPIO_OUTPUT_IO_1, cnt % 2);
+        // gpio_set_level(GPIO_OUTPUT_PWM_LED0, cnt % 2);
+        // gpio_set_level(GPIO_OUTPUT_PWM_LED1, cnt % 2);
         printf("3. LEDC set duty = %d\n", Duty);
         // for (ch = 0; ch < LEDC_TEST_CH_NUM; ch++) {
         //     ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, Duty);
         //     ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
         // }
+        
     }
 }
 
@@ -1092,11 +1229,13 @@ void setupGpio()
     //bit mask of the pins that you want to set,e.g.GPIO18/19
     io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
     //disable pull-down mode
-    io_conf.pull_down_en = (gpio_pulldown_t)0;
+    io_conf.pull_down_en = (gpio_pulldown_t)1;
     //disable pull-up mode
     io_conf.pull_up_en = (gpio_pullup_t)0;
     //configure GPIO with the given settings
     //gpio_config(&io_conf);
+    gpio_config(&io_conf);
+
 
     //interrupt of rising edge
     io_conf.intr_type = GPIO_INTR_ANYEDGE;
@@ -1127,6 +1266,8 @@ void setupGpio()
     gpio_isr_handler_remove(GPIO_INPUT_IO_0);
     //hook isr handler for specific gpio pin again
     gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void *)GPIO_INPUT_IO_0);
+    gpio_set_level(GPIO_OUTPUT_DIGITAL_DEVICE, 0);
+
 }
 
 void setupGroup0Timer0()

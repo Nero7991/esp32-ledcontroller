@@ -38,17 +38,17 @@ class TimerClass{
 			
 			void initializeTimer();
 			
-			uint16_t Count, Count_Save;
+			uint32_t Count, Count_Save;
 			
 			uint8_t Mode, Timer_ID;
 			
-			uint16_t NCount, NCount_Save; 
+			uint32_t NCount, NCount_Save; 
 					
 			bool NCount_EN, Count_EN;
 			
 			Fptr CallBackPtr;	
 			
-			void setCallBackTime(uint16_t time, uint8_t mode, Fptr func);
+			void setCallBackTime(uint32_t time, uint8_t mode, Fptr func);
 			
 			uint16_t getCallBackTime();
 			

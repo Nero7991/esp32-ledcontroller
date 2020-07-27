@@ -30,7 +30,7 @@ void TimerClass::initializeTimer(){
 	#endif
 }
 
-void TimerClass::setCallBackTime(uint16_t time, uint8_t mode, Fptr func){
+void TimerClass::setCallBackTime(uint32_t time, uint8_t mode, Fptr func){
 	Count = time;
 	Count_Save = time;
 	CallBackPtr = func;
