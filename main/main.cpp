@@ -67,6 +67,7 @@ void turnOn(uint8_t TimerId);
 void turnOff(uint8_t TimerId);
 void turnOnFor(int Time);
 int convertStringToNumber(char* str);
+const char* getStringFromNumber(uint64_t hex, bool AddZero);
 static void obtain_time(void);
 static void initialize_sntp(void);
 void time_sync_notification_cb(struct timeval *tv);
@@ -249,7 +250,6 @@ static esp_err_t update_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-
 static esp_err_t set_brightness_handler(httpd_req_t *req)
 {
     char*  buf;
@@ -358,9 +358,9 @@ static esp_err_t time_get_handler(httpd_req_t *req)
         // update 'now' variable with current time
         time(&now);
         char strftime_buf[64], strftime_buf2[64];
-        char Res[100];
+        char Res[200];
         Res[0] = '\0';
-        strcat(Res, "Current Time: ");
+        strcat(Res, "<html>Current Time: ");
     
     // Set timezone to Eastern Standard Time and print local time
     
@@ -368,9 +368,31 @@ static esp_err_t time_get_handler(httpd_req_t *req)
     localtime_r(&now, &TimeCurrent);
     strftime(strftime_buf, sizeof(strftime_buf), "%c", &TimeCurrent);
     strcat(Res, strftime_buf);
-    strcat(Res, " Boot Time: ");
+    strcat(Res, "<br>Boot Time: ");
     strftime(strftime_buf2, sizeof(strftime_buf2), "%c", &TimeBoot);
     strcat(Res, strftime_buf2);
+    if(CurrentAlarmPointer == 0)
+        strcat(Res, "<br><br>No Alarms<br>");
+    else{
+        strcat(Res, "<br><br>Alarms<br>");
+        for (int i = 0; i < CurrentAlarmPointer; i++){
+            strcat(Res, getStringFromNumber(i, 0));
+            strcat(Res, ")  ");
+            strcat(Res, Alarms[i].HourStr);
+            strcat(Res, ":");
+            strcat(Res, Alarms[i].MinStr);
+            strcat(Res, "  ->  ");
+            if(Alarms[i].AlarmType)
+            strcat(Res, "On<br>");
+            else
+            {
+                strcat(Res, "Off<br>");
+            }
+            
+        }
+    }
+
+    strcat(Res, "</html>");
 
     ESP_LOGI(TAG, "The current date/time in Mumbai is: %s", strftime_buf);
 
@@ -1112,6 +1134,43 @@ int convertStringToNumber(char* str){
     return x;
 }
 
+const char* getStringFromNumber(uint64_t hex, bool AddZero){
+  char Str[100];
+  static char Out[100];
+  int Count = 0;
+  if(hex == 0){
+    if(AddZero)
+    return "00";
+    else
+    return "0";
+  }
+  
+  while(hex > 0)
+  {
+    Str[Count] = ((hex % 10) + 48);
+    hex /= 10;
+    Count += 1;
+  }
+  int Start, Length;
+  if(Count == 1 && AddZero){
+    Length = Count + 1;
+    Start = 1;
+    Out[0] = 48;
+  }
+  else{
+    Length = Count;
+    Start = 0;
+  }
+  int i = 0;
+  Count -= 1;
+  for(i = Start; i < Length; i += 1){
+    Out[i] = Str[Count];
+    Count -= 1;
+  }
+  Out[i] = '\0';
+  return Out;
+}
+
 
 void setupLedPwm();
 void setupGpio();
@@ -1179,11 +1238,15 @@ extern "C" void app_main(void)
             obtain_time();
         for (int i = 0; i < CurrentAlarmPointer; i++){
             if((strcmp(Alarms[i].HourStr, StrHour) == 0) && (strcmp(Alarms[i].MinStr, StrMin)) == 0){
-                if(Alarms[i].AlarmType)
-                SetLutPointer = 1000;
+                if(Alarms[i].AlarmType){
+                    SetLutPointer = 1000;
+                    turnOnFor(15);
+                }
                 else
                 {
                     SetLutPointer = 0;
+                    OnTimer.resetTimer();
+                    turnOff(0);
                 }
                 
             }
