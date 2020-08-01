@@ -819,7 +819,7 @@ static void connect_handler(void* arg, esp_event_base_t event_base,
 
 
 /*set the ssid and password via "idf.py menuconfig"*/
-#define DEFAULT_SSID "Collaco Hall"
+#define DEFAULT_SSID "Collaco WiFi"
 #define DEFAULT_PWD "Orencollaco1997"
 #define Bssid { 0xCC, 0x32, 0xE5, 0x41, 0xDD, 0x6B };
 
@@ -946,7 +946,7 @@ void setupWifi(void)
 #define GPIO_OUTPUT_PWM_LED0            (gpio_num_t)18
 #define GPIO_OUTPUT_PWM_LED1            (gpio_num_t)19
 #define GPIO_OUTPUT_DIGITAL_DEVICE      (gpio_num_t)27
-#define GPIO_OUTPUT_PIN_SEL             (( 1ULL << GPIO_OUTPUT_PWM_LED0) | (1ULL << GPIO_OUTPUT_PWM_LED1) | (1ULL << GPIO_OUTPUT_DIGITAL_DEVICE))
+#define GPIO_OUTPUT_PIN_SEL             (1ULL << GPIO_OUTPUT_DIGITAL_DEVICE)
 #define GPIO_INPUT_IO_0                 (gpio_num_t)4
 #define GPIO_INPUT_IO_1                 (gpio_num_t)5
 #define GPIO_INPUT_PIN_SEL              ((1ULL << GPIO_INPUT_IO_0) | (1ULL << GPIO_INPUT_IO_1))
@@ -1296,9 +1296,7 @@ void setupGpio()
     //disable pull-up mode
     io_conf.pull_up_en = (gpio_pullup_t)0;
     //configure GPIO with the given settings
-    //gpio_config(&io_conf);
     gpio_config(&io_conf);
-
 
     //interrupt of rising edge
     io_conf.intr_type = GPIO_INTR_ANYEDGE;
