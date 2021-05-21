@@ -40,6 +40,10 @@
 #include <sys/param.h>
 #include "esp_netif.h"
 #include "esp_eth.h"
+
+#include "nvs.h"
+//#include "nvs_handle.hpp"
+
 using namespace std; 
 //#include <esp_https_server.h>
 
@@ -83,7 +87,8 @@ static void initialize_sntp(void);
 void time_sync_notification_cb(struct timeval *tv);
 volatile int FadeLutPointer = 0, SetLutPointer = 1000, CurrentLutPointer = 0;
 volatile bool FadeDirection = 0;
-volatile bool FadeEnabled = 0;
+volatile bool FadeEnabled = 0, AutomationEnabled = 0;
+volatile bool IsFirstTime = true;
 time_t StartTime;
 
 struct Alarm {
@@ -95,7 +100,8 @@ Alarm Alarms[20];
 int MaxAlarms = 20;
 int CurrentAlarmPointer = 0;
 TimerClass T1, OnTimer;
-
+char LastTankFull[50] = "Tank has never been filled";
+char ErrorMsg[100];
 
 /* Constants that aren't configurable in menuconfig */
 #define WEB_SERVER "example.com"
@@ -105,7 +111,7 @@ TimerClass T1, OnTimer;
 static const char *TAG = "power_save";
 
 static const char *REQUEST = "GET " WEB_PATH " HTTP/1.0\r\n"
-    "Host: "WEB_SERVER":"WEB_PORT"\r\n"
+    "Host: " WEB_SERVER ":" WEB_PORT"\r\n"
     "User-Agent: esp-idf/1.0 esp32\r\n"
     "\r\n";
 
@@ -368,7 +374,7 @@ static esp_err_t time_get_handler(httpd_req_t *req)
         // update 'now' variable with current time
         time(&now);
         char strftime_buf[64], strftime_buf2[64];
-        char Res[400];
+        char Res[800];
         Res[0] = '\0';
         strcat(Res, "<html>Current Time: ");
     
@@ -389,11 +395,19 @@ static esp_err_t time_get_handler(httpd_req_t *req)
     {
         strcat(Res, "Full"); 
     }
-    
-    if(CurrentAlarmPointer == 0)
+    if(!AutomationEnabled){
+        strcat(Res, "<br>Time based automation disabled due to incorrect time. Please set correct time. Motor will still turn off when the tank gets full.");
+    }
+    strcat(Res, "<br>");
+    strcat(Res, LastTankFull);    
+    if(CurrentAlarmPointer == 0){
         strcat(Res, "<br><br>No Alarms<br>");
+    }      
     else{
+        if(AutomationEnabled)
         strcat(Res, "<br><br>Alarms<br>");
+        else
+        strcat(Res, "<br><br>Alarms (Disabled)<br>");
         for (int i = 0; i < CurrentAlarmPointer; i++){
             strcat(Res, getStringFromNumber(i, 0));
             strcat(Res, ") ");
@@ -410,7 +424,8 @@ static esp_err_t time_get_handler(httpd_req_t *req)
             
         }
     }
-
+    if(ErrorMsg[0] != '\0')
+    strcat(Res, ErrorMsg);
     strcat(Res, "</html>");
 
     ESP_LOGI(TAG, "The current date/time in Mumbai is: %s", strftime_buf);
@@ -494,7 +509,7 @@ static esp_err_t alarm_set_handler(httpd_req_t *req)
     /* Read URL query string length and allocate memory for length + 1,
      * extra byte for null termination */
     buf_len = httpd_req_get_url_query_len(req) + 1;
-    char Response[32], TimeStr[8];
+    char Response[100], TimeStr[8];
     Response[0] = '\0';
     TimeStr[0] = '\0';
     if (buf_len > 1) {
@@ -534,6 +549,20 @@ static esp_err_t alarm_set_handler(httpd_req_t *req)
             else{
                 Alarms[CurrentAlarmPointer].HourStr[0] = '\0';
                 Alarms[CurrentAlarmPointer].MinStr[0] = '\0';
+                printf("Opening Non-Volatile Storage (NVS) handle... ");
+                //nvs_handle_t handle;
+                bool NvsOpen = false;
+                esp_err_t result;
+
+                nvs_handle_t nvs_handle;
+                result = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+                if (result != ESP_OK) {
+                    printf("Error (%s) opening NVS handle!\n", esp_err_to_name(result));
+                } else {
+                    printf("Done\n");
+                    NvsOpen = true;
+                }
+                
                 if(strcmp(Type, "on") == 0){
                     Alarms[CurrentAlarmPointer].AlarmType = true;
                     strcat(Alarms[CurrentAlarmPointer].HourStr, Hour);
@@ -542,6 +571,27 @@ static esp_err_t alarm_set_handler(httpd_req_t *req)
                     strcat(Response, "Alarm set! ");
                     if(CurrentAlarmPointer != (MaxAlarms - 1))
                     CurrentAlarmPointer += 1;
+                    if(NvsOpen){
+                        esp_err_t err = ESP_OK;
+                        size_t required_size = sizeof(Alarms);
+                        err = nvs_set_blob(nvs_handle, "alarms_nvs", &Alarms, required_size);
+                        printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+                        if(err != ESP_OK)
+                            strcat(Response, "Error ");
+                        // Commit written value.
+                        // After setting any values, nvs_commit() must be called to ensure changes are written
+                        // to flash storage. Implementations may write to storage at other times,
+                        // but this is not guaranteed.
+                        printf("Committing updates in NVS ... ");
+                        err = nvs_commit(nvs_handle);
+                        printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+                        if(err != ESP_OK)
+                            strcat(Response, "Failed to save alarm.");
+                        else
+                            strcat(Response, "Saved successfully");
+
+                        nvs_close(nvs_handle);
+                    }
                 }
                 else if(strcmp(Type, "off") == 0){
                     Alarms[CurrentAlarmPointer].AlarmType = false;
@@ -551,12 +601,33 @@ static esp_err_t alarm_set_handler(httpd_req_t *req)
                     strcat(Response, "Alarm set! ");
                     if(CurrentAlarmPointer != (MaxAlarms - 1))
                     CurrentAlarmPointer += 1;
+                    if(NvsOpen){
+                        esp_err_t err = ESP_OK;
+                        size_t required_size = sizeof(Alarms);
+                        err = nvs_set_blob(nvs_handle, "alarms_nvs", &Alarms, required_size);
+                        printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+                        if(err != ESP_OK)
+                            strcat(Response, "Error ");
+                        // Commit written value.
+                        // After setting any values, nvs_commit() must be called to ensure changes are written
+                        // to flash storage. Implementations may write to storage at other times,
+                        // but this is not guaranteed.
+                        printf("Committing updates in NVS ... ");
+                        err = nvs_commit(nvs_handle);
+                        printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+                        if(err != ESP_OK)
+                            strcat(Response, "Failed to save alarm.");
+                        else
+                            strcat(Response, "Saved successfully");
+
+                        nvs_close(nvs_handle);
+                    }
                 }
                 else{
                     strcat(Response, "Invalid time format");
                 }
             }
-            strcat(Response, "Input: ");
+            strcat(Response, "<br>Input: ");
             strcat(Response, TimeStr);
         }
         free(buf);
@@ -641,7 +712,7 @@ static esp_err_t turn_device_on_handler(httpd_req_t *req)
 
 static esp_err_t turn_device_off_handler(httpd_req_t *req)
 {
-    char*  buf;
+    //char*  buf;
     size_t buf_len;
 
     /* Read URL query string length and allocate memory for length + 1,
@@ -657,6 +728,144 @@ static esp_err_t turn_device_off_handler(httpd_req_t *req)
     /* Send response with custom headers and body set as the
      * string passed in user context*/
     const char* resp_str = (const char*) req->user_ctx;
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+
+    /* After sending the HTTP response the old HTTP request
+     * headers are lost. Check if HTTP request headers can be read now. */
+    if (httpd_req_get_hdr_value_len(req, "Host") == 0) {
+        ESP_LOGI(TAG, "Request headers lost");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t datetime_set_handler(httpd_req_t *req)
+{
+    char*  buf;
+    size_t buf_len;
+
+    /* Get header value string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        /* Copy null terminated value string into buffer */
+        if (httpd_req_get_hdr_value_str(req, "Host", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Host: %s", buf);
+        }
+        free(buf);
+    }
+
+    buf_len = httpd_req_get_hdr_value_len(req, "Test-Header-2") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        if (httpd_req_get_hdr_value_str(req, "Test-Header-2", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Test-Header-2: %s", buf);
+        }
+        free(buf);
+    }
+
+    buf_len = httpd_req_get_hdr_value_len(req, "Test-Header-1") + 1;
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        if (httpd_req_get_hdr_value_str(req, "Test-Header-1", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Test-Header-1: %s", buf);
+        }
+        free(buf);
+    }
+
+    /* Read URL query string length and allocate memory for length + 1,
+     * extra byte for null termination */
+    buf_len = httpd_req_get_url_query_len(req) + 1;
+    char Res1[400];//, TimeStr[8];
+    Res1[0] = '\0';
+    //TimeStr[0] = '\0';
+    if (buf_len > 1) {
+        buf = (char*)malloc(buf_len);
+        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found URL query => %s", buf);
+            char param[32];
+            char Hour[5], Min[5], Second[5], Day[5], Month[5], Year[5];
+            Hour[0] = '\0';
+            Min[0] = '\0';
+            Day[0] = '\0';
+            Second[0] = '\0';
+            Month[0] = '\0';
+            Year[0] = '\0';
+            //Second[0] = '\0';
+
+            //struct tm Tm1;
+            /* Get value of expected key from query string */
+            if (httpd_query_key_value(buf, "hours", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query1=%s", param);
+                strcat(Hour, param);
+            }
+            if (httpd_query_key_value(buf, "minutes", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query3=%s", param);
+                strcat(Min, param);
+            }
+            if (httpd_query_key_value(buf, "seconds", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query3=%s", param);
+                strcat(Second, param);
+            }
+            if (httpd_query_key_value(buf, "day", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query2=%s", param);
+                strcat(Day, param);
+            }
+            if (httpd_query_key_value(buf, "month", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query2=%s", param);
+                strcat(Month, param);
+            }
+            if (httpd_query_key_value(buf, "year", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query2=%s", param);
+                strcat(Year, param);
+            }
+            
+            struct tm t = {0};        // Initalize to all 0's
+            t.tm_year = convertStringToNumber(Year) - 1900;    // This is year-1900, so 121 = 2021
+            t.tm_mon = convertStringToNumber(Month) - 1;
+            t.tm_mday = convertStringToNumber(Day);
+            t.tm_hour = convertStringToNumber(Hour);
+            t.tm_min = convertStringToNumber(Min);
+            t.tm_sec = convertStringToNumber(Second);
+            time_t timeSinceEpoch = mktime(&t);
+            if( timeSinceEpoch == -1 ) {
+               strcat(Res1, "Error occured while setting time. Please check the time to be set");
+               return ESP_OK;
+            } 
+            IsFirstTime = true;
+            struct timeval tv;
+            tv.tv_sec = timeSinceEpoch;  // epoch time (seconds)
+            tv.tv_usec = 0;    // microseconds
+            settimeofday(&tv, NULL);
+
+
+            time_t now;
+            struct tm TimeCurrent, TimeBoot;
+                // update 'now' variable with current time
+            time(&now);
+            char strftime_buf[64];
+            
+            Res1[0] = '\0';
+            strcat(Res1, "<html>Time set!<br><br>Current Time: ");
+
+            // Set timezone to Eastern Standard Time and print local time
+
+            localtime_r(&StartTime, &TimeBoot);
+            localtime_r(&now, &TimeCurrent);
+            strftime(strftime_buf, sizeof(strftime_buf), "%c", &TimeCurrent);
+            strcat(Res1, strftime_buf);
+            strcat(Res1, "</html>");
+        }
+        free(buf);
+    }
+
+    /* Set some custom headers */
+    httpd_resp_set_hdr(req, "Custom-Header-1", "Custom-Value-1");
+    httpd_resp_set_hdr(req, "Custom-Header-2", "Custom-Value-2");
+
+    /* Send response with custom headers and body set as the
+     * string passed in user context*/
+    const char* resp_str = (const char*)Res1;
     httpd_resp_send(req, resp_str, strlen(resp_str));
 
     /* After sending the HTTP response the old HTTP request
@@ -705,6 +914,15 @@ static const httpd_uri_t updateFirmware = {
 
 time_t now;
 struct tm timeinfo;
+
+static const httpd_uri_t setDateTime = {
+    .uri       = "/setdatetime",
+    .method    = HTTP_GET,
+    .handler   = datetime_set_handler,
+    /* Let's pass response string in user
+     * context to demonstrate it's usage */
+    .user_ctx  = (void*)""
+};
 
 static const httpd_uri_t getDeviceTime = {
     .uri       = "/getdevicetime",
@@ -800,6 +1018,7 @@ static httpd_handle_t start_webserver(void)
         // Set URI handlers
         ESP_LOGI(TAG, "Registering URI handlers");
         httpd_register_uri_handler(server, &setBrightness);
+        httpd_register_uri_handler(server, &setDateTime);
         httpd_register_uri_handler(server, &updateFirmware);
         httpd_register_uri_handler(server, &getDeviceTime);
         httpd_register_uri_handler(server, &setAlarm);
@@ -1195,9 +1414,10 @@ void setupLedPwm();
 void setupGpio();
 void setupGroup0Timer0();
 
+
 extern "C" void app_main(void)
 {
-   
+    ErrorMsg[0] = '\0';
     backtofactory();
 
 
@@ -1233,12 +1453,45 @@ extern "C" void app_main(void)
     S1.longPress(toggleLight);
     S2.longPress(toggleFadeMode);
     uint64_t Time_AcquireTime;
-    bool IsFirstTime = true;
+    
     
     Time_AcquireTime = Timer.millis();
     char OldStrMin[5];
     OldStrMin[0] = '\0';
-    uint8_t TankFullCount = 0;
+    //uint8_t TankFullCount = 0;
+
+    printf("Opening Non-Volatile Storage (NVS) handle... ");
+    esp_err_t result;
+    // Handle will automatically close when going out of scope or when it's reset.
+    nvs_handle_t nvs_handle;
+    result = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+    if (result != ESP_OK) {
+        printf("Error (%s) opening NVS handle!\n", esp_err_to_name(result));
+    } else {
+        printf("Done\n");
+
+        // Read
+        printf("Reading alarms from NVS ... ");
+        esp_err_t err;
+        size_t required_size = sizeof(Alarms);
+        err = nvs_get_blob(nvs_handle, "alarms_nvs", &Alarms, &required_size);
+        switch (err) {
+            case ESP_OK:
+                printf("Done\n");
+                
+                break;
+            case ESP_ERR_NVS_NOT_FOUND:
+                printf("The value is not initialized yet!\n");
+                strcat(ErrorMsg, "<br>No alarms stored in NVS");
+                break;
+            default :
+                printf("Error (%s) reading!\n", esp_err_to_name(err));
+                strcat(ErrorMsg, "<br>Error reading from NVS : ");
+                strcat(ErrorMsg, esp_err_to_name(err));
+        }
+        nvs_close(nvs_handle);
+    }
+
     while (1)
     {
 
@@ -1255,6 +1508,11 @@ extern "C" void app_main(void)
         }
         time(&Now);
         localtime_r(&Now, &TimeCurrent);
+        uint16_t CurrentYear = TimeCurrent.tm_year + 1900;
+        if(CurrentYear > 2000)
+        AutomationEnabled = 1;
+        else
+        AutomationEnabled = 0;
         strftime(StrHour, sizeof(StrHour), "%H", &TimeCurrent);
         strftime(StrMin, sizeof(StrMin), "%M", &TimeCurrent);
         //strftime(StrSec, sizeof(StrSec), "%S", &TimeCurrent);
@@ -1268,7 +1526,7 @@ extern "C" void app_main(void)
                 if((strcmp(Alarms[i].HourStr, StrHour) == 0) && (strcmp(Alarms[i].MinStr, StrMin) == 0)){
                     if(Alarms[i].AlarmType){
                         SetLutPointer = 1000;
-                        if(gpio_get_level((gpio_num_t)TANK_FULL_SENSE))
+                        if(gpio_get_level((gpio_num_t)TANK_FULL_SENSE) && AutomationEnabled)
                         turnOnFor(20);
                     }
                     else
@@ -1281,11 +1539,16 @@ extern "C" void app_main(void)
                 }
             }
         }
-        if(gpio_get_level((gpio_num_t)TANK_FULL_SENSE)){
+        if(gpio_get_level((gpio_num_t)TANK_FULL_SENSE)){                //If TANK_FULL_SENSE is LOW, tank full
             //TankFullCount = 0;
         }
         else{
             turnOff(0);
+            LastTankFull[0] = '\0';
+            strcat(LastTankFull, "Tank last filled at ");
+            strcat(LastTankFull, StrHour);
+            strcat(LastTankFull, ":");
+            strcat(LastTankFull, StrMin);
             // if(gpio_get_level((gpio_num_t)GPIO_OUTPUT_DIGITAL_DEVICE)){
             //     TankFullCount += 1;
             //     if(TankFullCount > 2)
