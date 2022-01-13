@@ -1,7 +1,27 @@
-# ESP32 LED & MAINS Applicance controller
+# ESP32 LED & MAINS Applicance controller using HTTPS Get requests
 
 Implements LED Lamp with PWM brightness control and MAINS application ON/OFF using HTTP GET requests. 
 Also, ability to set scheduled ON/OFF for both
+
+## Physical Interface
+
+### Pins
+
+### Input (Pull to ground for action)
+
+GPIO4 -> Button toggle switch (UP/Increase), Increase brightness on short press, long press toggles LED ON/OFF
+
+GPIO5 -> Button toggle switch (DOWN/Decrease), Decrease brightness on short press, long press toggles LED fade mode(dims on and off)
+
+GPIO17 -> Water tank full sense
+
+### Outputs 
+
+GPIO18 -> 12-bit PWM output for LED control(same as GPIO19)
+
+GPIO19 -> 12-bit PWM Output
+
+GPIO27 -> HIGH/LOW for mains rated relay
 
 LED (12v strip) is PWM controlled, MAINS appliances can be controlled using a solid state relay or mechanical relay
 
