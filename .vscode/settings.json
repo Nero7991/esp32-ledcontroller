@@ -63,5 +63,6 @@
     "streambuf": "cpp",
     "thread": "cpp",
     "typeinfo": "cpp"
-  }
+  },
+  "idf.adapterTargetName": "esp32"
 }
